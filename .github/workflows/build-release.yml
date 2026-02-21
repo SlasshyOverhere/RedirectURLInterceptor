@@ -130,7 +130,7 @@ jobs:
           - `SlasshyUrlInterceptor-win-x64.zip` (full publish folder)
 
           ### Build Metadata
-          - Commit: `$shortSha`
+          - Commit: $shortSha
           - Workflow: `${{ github.workflow }}`
           - Run: `${{ github.run_number }}`
           "@
@@ -139,6 +139,7 @@ jobs:
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.release_meta.outputs.release_name }}
@@ -148,3 +149,19 @@ jobs:
           files: |
             ${{ env.ZIP_PATH }}
             ${{ env.PUBLISH_DIR }}/SlasshyUrlInterceptor.exe
+
+      - name: Verify release exists
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $url = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag"
+          $headers = @{
+            Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $release = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+          if (-not $release -or -not $release.id) {
+            throw "Release verification failed for tag $tag."
+          }
+          Write-Host "Verified release id $($release.id) for $tag."
