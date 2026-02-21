@@ -1,0 +1,45 @@
+# .NET build output
+**/bin/
+**/obj/
+**/out/
+**/publish/
+**/publish-*/
+RedirectUrlInterceptor/publish-slasshy/
+
+# Test and coverage output
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# NuGet packages
+packages/
+*.nupkg
+*.snupkg
+
+# Logs and temp files
+*.log
+*.tmp
+*.cache
+*.pid
+*.trace
+
+# User and IDE settings
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+_ReSharper*/
+*.DotSettings.user
+
+# OS files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local secrets/env
+.env
+.env.*

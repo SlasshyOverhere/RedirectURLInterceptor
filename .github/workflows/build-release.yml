@@ -1,0 +1,150 @@
+name: Build and Release Slasshy Url Interceptor
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      PROJECT_PATH: RedirectUrlInterceptor/RedirectUrlInterceptor.csproj
+      PUBLISH_DIR: RedirectUrlInterceptor/out/publish
+      ZIP_PATH: RedirectUrlInterceptor/out/SlasshyUrlInterceptor-win-x64.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore $env:PROJECT_PATH
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build $env:PROJECT_PATH -c Release --no-restore
+
+      - name: Publish EXE
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path $env:PUBLISH_DIR -Force | Out-Null
+          dotnet publish $env:PROJECT_PATH `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:DebugType=None `
+            /p:DebugSymbols=false `
+            -o $env:PUBLISH_DIR
+
+      - name: Create ZIP package
+        shell: pwsh
+        run: |
+          if (Test-Path $env:ZIP_PATH) {
+            Remove-Item $env:ZIP_PATH -Force
+          }
+          Compress-Archive -Path "$env:PUBLISH_DIR/*" -DestinationPath $env:ZIP_PATH -CompressionLevel Optimal
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SlasshyUrlInterceptor-win-x64
+          path: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.PUBLISH_DIR }}/SlasshyUrlInterceptor.exe
+          if-no-files-found: error
+
+      - name: Compute release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        id: release_meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $isEarlyBeta = $tag -match '^v0\.'
+
+          if ($isEarlyBeta) {
+            "prerelease=true" >> $env:GITHUB_OUTPUT
+            "release_name=Slasshy Url Interceptor $tag (Early Beta)" >> $env:GITHUB_OUTPUT
+            "channel=Early Beta" >> $env:GITHUB_OUTPUT
+          } else {
+            "prerelease=false" >> $env:GITHUB_OUTPUT
+            "release_name=Slasshy Url Interceptor $tag" >> $env:GITHUB_OUTPUT
+            "channel=Stable" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Generate release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $currentTag = "${{ github.ref_name }}"
+          git fetch --tags --force
+
+          $previousTag = $null
+          try {
+            $previousTag = (git describe --tags --abbrev=0 "$currentTag^" 2>$null).Trim()
+          } catch {
+            $previousTag = $null
+          }
+
+          if ([string]::IsNullOrWhiteSpace($previousTag)) {
+            $range = $currentTag
+          } else {
+            $range = "$previousTag..$currentTag"
+          }
+
+          $changes = git log --no-merges --pretty=format:"- %s (%h)" $range
+          if (-not $changes) {
+            $changes = "- Internal maintenance and build pipeline updates."
+          }
+
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $channel = "${{ steps.release_meta.outputs.channel }}"
+          $notes = @"
+          ## Slasshy Url Interceptor $currentTag
+
+          ### Release Channel
+          - $channel
+
+          ### What's Updated
+          $changes
+
+          ### Build Output
+          - `SlasshyUrlInterceptor.exe` (win-x64, self-contained, single-file)
+          - `SlasshyUrlInterceptor-win-x64.zip` (full publish folder)
+
+          ### Build Metadata
+          - Commit: `$shortSha`
+          - Workflow: `${{ github.workflow }}`
+          - Run: `${{ github.run_number }}`
+          "@
+
+          $notes | Out-File -FilePath release-notes.md -Encoding utf8
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.release_meta.outputs.release_name }}
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          body_path: release-notes.md
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.PUBLISH_DIR }}/SlasshyUrlInterceptor.exe
