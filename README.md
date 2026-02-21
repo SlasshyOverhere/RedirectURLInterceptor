@@ -1,36 +1,60 @@
-# Slasshy Url Interceptor (Windows Tray App)
+# Slasshy Url Interceptor
 
-A lightweight Windows tray app that captures redirect URLs when desktop apps open a browser (for example, `Sign in with Google`).
+Lightweight Windows tray app that intercepts redirect links from desktop apps, copies them to clipboard instantly, and can forward them to your browser.
 
-## Core behavior
+![Slasshy Url Interceptor use-case demo](docs/media/usecase.gif)
 
-- Runs in the background from the system tray.
-- Captures URLs passed in process launch commands (browser and launcher/helper processes).
-- Records parent process info (which app opened the browser).
-- Instantly copies every intercepted URL to clipboard.
-- Lets you turn interception ON/OFF from tray right-click.
-- Lets you exclude specific parent applications from interception.
-- Optional redirect-chain resolution (off by default for lower overhead).
-- Supports full interception mode by setting this app as default `HTTP/HTTPS` handler, then forwarding to your chosen real browser.
+## Why this exists
 
-## Tray menu
+Many apps trigger browser redirects for sign-in, preset downloads, OAuth flows, and deep links. Slasshy Url Interceptor gives you control over those links:
 
-Right-click the tray icon and use:
+- captures the URL before it disappears into the browser.
+- copies it to clipboard immediately.
+- optionally forwards it to your preferred browser.
+- logs source app + process for debugging and automation.
+
+## Common use cases
+
+- Capture OAuth links (`Sign in with Google`, Microsoft login, etc.).
+- Capture one-click resource links from tools like audio/util apps.
+- Debug which app launched a link and with what URL.
+- Build automations that depend on intercepted URL data.
+
+## Features
+
+- Always-on tray app, built for low overhead.
+- `HTTP/HTTPS` protocol interception mode for full coverage.
+- On/off switch from tray menu.
+- Exclusion list for apps you do not want to intercept.
+- Optional redirect-chain resolution.
+- Optional browser forwarding after interception.
+- JSONL logging for machine-readable history.
+
+## Quick start (recommended)
+
+1. Download latest `SlasshyUrlInterceptor.exe` from Releases.
+2. Run the EXE once (tray icon appears).
+3. Right-click tray icon -> `Open Default Apps Settings`.
+4. Set both `HTTP` and `HTTPS` defaults to `Slasshy Url Interceptor`.
+5. In tray, choose `Forward Browser: ...` and select your real browser executable (`chrome.exe`, `msedge.exe`, etc.).
+6. Keep `Open Intercepted Links In Browser` ON if you want normal browsing behavior after capture.
+
+## Tray menu options
 
 - `Turn Interception On/Off`
 - `Excluded Apps...`
-- `Open Intercepted Links In Browser` (ON/OFF)
-- `Forward Browser: ...` (select browser executable used after interception)
-- `Open Default Apps Settings` (set this app as default HTTP/HTTPS app for full coverage)
+- `Open Intercepted Links In Browser`
+- `Forward Browser: ...`
+- `Open Default Apps Settings`
 - `Resolve Redirect Chain`
 - `Launch At Startup`
 - `Open Logs Folder`
 - `Open App Data Folder`
 - `Exit`
 
-## Data location
+## Data storage
 
-All app data is stored in:
+Path:
 
 ```text
 %LocalAppData%\SlasshyUrlInterceptor
@@ -38,14 +62,20 @@ All app data is stored in:
 
 Files:
 
-- `config.json` (settings)
-- `app.log` (internal app errors/status)
-- `logs\intercepts-YYYYMMDD.jsonl` (captured URLs)
+- `config.json` for settings.
+- `app.log` for runtime/status logs.
+- `logs\intercepts-YYYYMMDD.jsonl` for captured URL records.
 
-## Build (dev)
+Example JSONL record:
+
+```json
+{"TimestampUtc":"2026-02-21T18:03:10.031Z","BrowserProcess":"msedge.exe","BrowserPid":20840,"ParentProcess":"myapp.exe","ParentPid":10324,"Url":"https://accounts.google.com/o/oauth2/v2/auth?...","RedirectTrace":null}
+```
+
+## Build from source
 
 ```powershell
-dotnet build .\RedirectUrlInterceptor\RedirectUrlInterceptor.csproj
+dotnet build .\RedirectUrlInterceptor\RedirectUrlInterceptor.csproj -c Release
 ```
 
 ## Publish EXE
@@ -54,52 +84,28 @@ dotnet build .\RedirectUrlInterceptor\RedirectUrlInterceptor.csproj
 dotnet publish .\RedirectUrlInterceptor\RedirectUrlInterceptor.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true
 ```
 
-Output EXE:
+Published binary:
 
 ```text
 RedirectUrlInterceptor\bin\Release\net8.0-windows\win-x64\publish\SlasshyUrlInterceptor.exe
 ```
 
-## GitHub Actions CI/CD
+## CI/CD and releases
 
-Workflow file: `.github/workflows/build-release.yml`
+Workflow: `.github/workflows/build-release.yml`
 
-- On push/PR to `main`: restores, builds, and publishes the app on `windows-latest`.
-- On tag push matching `v*` (example: `v1.0.0`): publishes build artifacts and creates a GitHub Release.
-- Release assets:
-  - `SlasshyUrlInterceptor.exe`
-  - `SlasshyUrlInterceptor-win-x64.zip`
-- Release notes are generated from commit history between the current tag and previous tag.
+- Push/PR to `main`: build validation on `windows-latest`.
+- Push tag `v*`: build + publish release assets + release notes.
 
-Create a release from your machine:
+Release flow:
 
 ```powershell
-git tag v1.0.0
+git tag v0.0.2
 git push origin main --tags
 ```
 
-## Output format
+## Limits and notes
 
-Each line in `intercepts-YYYYMMDD.jsonl` is one JSON record:
-
-```json
-{"TimestampUtc":"2026-02-21T18:03:10.031Z","BrowserProcess":"msedge.exe","BrowserPid":20840,"ParentProcess":"myapp.exe","ParentPid":10324,"Url":"https://accounts.google.com/o/oauth2/v2/auth?...","RedirectTrace":null}
-```
-
-## Limitations
-
-- Best-effort capture in monitor mode.
-- Full guaranteed capture requires setting this app as the default handler for `HTTP` and `HTTPS` in Windows settings.
-- Does not capture in-page JavaScript router redirects inside already opened tabs.
-
-## Full interception setup (required for apps like FxSound)
-
-1. Run the tray app once as normal.
-2. Right-click tray icon -> `Forward Browser: ...` and select your real browser EXE (`chrome.exe`, `msedge.exe`, etc.).
-   If you only want clipboard capture and no browser open, turn OFF `Open Intercepted Links In Browser`.
-3. Right-click tray icon -> `Open Default Apps Settings`.
-4. Set both `HTTP` and `HTTPS` protocol defaults to `Slasshy Url Interceptor`.
-
-## Security note
-
-Captured OAuth/auth URLs may contain sensitive query parameters (codes/tokens). Protect logs appropriately.
+- Full guaranteed capture needs protocol assignment (`HTTP` + `HTTPS`).
+- In-page JavaScript redirects inside an already open browser tab are outside process-launch interception.
+- Captured URLs may contain sensitive OAuth parameters. Protect logs accordingly.
