@@ -28,6 +28,7 @@ Many apps trigger browser redirects for sign-in, preset downloads, OAuth flows, 
 - Exclusion list for apps you do not want to intercept.
 - Optional redirect-chain resolution.
 - Optional browser forwarding after interception.
+- Auto update from GitHub Releases.
 - JSONL logging for machine-readable history.
 
 ## Quick start (recommended)
@@ -46,6 +47,8 @@ Many apps trigger browser redirects for sign-in, preset downloads, OAuth flows, 
 - `Open Intercepted Links In Browser`
 - `Forward Browser: ...`
 - `Open Default Apps Settings`
+- `Enable Auto Update`
+- `Check For Updates...`
 - `Resolve Redirect Chain`
 - `Launch At Startup`
 - `Open Logs Folder`
@@ -65,6 +68,7 @@ Files:
 - `config.json` for settings.
 - `app.log` for runtime/status logs.
 - `logs\intercepts-YYYYMMDD.jsonl` for captured URL records.
+- `updates\` temporary files used by auto-update/install.
 
 Example JSONL record:
 

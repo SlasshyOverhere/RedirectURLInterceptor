@@ -1,14 +1,18 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
+using Timer = System.Windows.Forms.Timer;
 
 namespace RedirectUrlInterceptor;
 
 internal sealed class TrayApplicationContext : ApplicationContext
 {
+    private static readonly TimeSpan StartupUpdateCheckInterval = TimeSpan.FromHours(6);
+
     private readonly FileLogger _logger;
     private readonly JsonlCaptureWriter _captureWriter;
     private readonly InterceptorEngine _engine;
+    private readonly AutoUpdater _autoUpdater;
     private readonly Icon _appIcon;
 
     private readonly NotifyIcon _trayIcon;
@@ -18,15 +22,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _toggleForwardToBrowserItem;
     private readonly ToolStripMenuItem _forwardBrowserItem;
+    private readonly ToolStripMenuItem _autoUpdateItem;
+    private readonly ToolStripMenuItem _checkForUpdatesItem;
 
     private AppSettings _settings;
     private readonly SynchronizationContext _uiContext;
+    private int _updateOperationInProgress;
 
     public TrayApplicationContext(FileLogger logger)
     {
         _logger = logger;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = AppSettings.Load(AppPaths.ConfigPath, _logger);
+        _autoUpdater = new AutoUpdater(_logger);
 
         _captureWriter = new JsonlCaptureWriter(AppPaths.LogsDirectory, _logger);
         _engine = new InterceptorEngine(_captureWriter, _logger);
@@ -69,6 +77,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var openDefaultAppsItem = new ToolStripMenuItem("Open Default Apps Settings");
         openDefaultAppsItem.Click += (_, _) => OpenDefaultAppsSettings();
 
+        _autoUpdateItem = new ToolStripMenuItem("Enable Auto Update")
+        {
+            Checked = _settings.AutoUpdateEnabled,
+            CheckOnClick = true
+        };
+        _autoUpdateItem.Click += (_, _) => ToggleAutoUpdate();
+
+        _checkForUpdatesItem = new ToolStripMenuItem("Check For Updates...");
+        _checkForUpdatesItem.Click += async (_, _) => await CheckForUpdatesAsync(manualCheck: true, installIfAvailable: false);
+
         _startupItem = new ToolStripMenuItem("Launch At Startup")
         {
             Checked = StartupManager.IsEnabled(),
@@ -93,6 +111,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_toggleForwardToBrowserItem);
         menu.Items.Add(_forwardBrowserItem);
         menu.Items.Add(openDefaultAppsItem);
+        menu.Items.Add(_autoUpdateItem);
+        menu.Items.Add(_checkForUpdatesItem);
         menu.Items.Add(_startupItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(openLogsItem);
@@ -119,6 +139,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ToolTipIcon.Info);
 
         _logger.Info($"Tray app started. Logs: {_captureWriter.GetCurrentLogPath()}");
+        ScheduleStartupUpdateCheck();
     }
 
     protected override void ExitThreadCore()
@@ -304,6 +325,173 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void ToggleAutoUpdate()
+    {
+        try
+        {
+            _settings.AutoUpdateEnabled = _autoUpdateItem.Checked;
+            _settings.Save(AppPaths.ConfigPath, _logger);
+            _logger.Info($"Auto update set to {_settings.AutoUpdateEnabled}.");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Failed to toggle auto update.", ex);
+            _autoUpdateItem.Checked = _settings.AutoUpdateEnabled;
+            _trayIcon.ShowBalloonTip(2500, AppIdentity.DisplayName, "Could not update auto-update setting.", ToolTipIcon.Error);
+        }
+    }
+
+    private void ScheduleStartupUpdateCheck()
+    {
+        var timer = new Timer { Interval = 2500 };
+        timer.Tick += async (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+
+            try
+            {
+                await RunStartupUpdateCheckAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("Startup update check failed.", ex);
+            }
+        };
+        timer.Start();
+    }
+
+    private async Task RunStartupUpdateCheckAsync()
+    {
+        if (!_settings.AutoUpdateEnabled)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (_settings.LastUpdateCheckUtc is { } lastChecked &&
+            now - lastChecked < StartupUpdateCheckInterval)
+        {
+            return;
+        }
+
+        await CheckForUpdatesAsync(manualCheck: false, installIfAvailable: true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool manualCheck, bool installIfAvailable)
+    {
+        if (Interlocked.Exchange(ref _updateOperationInProgress, 1) == 1)
+        {
+            if (manualCheck)
+            {
+                _trayIcon.ShowBalloonTip(1800, AppIdentity.DisplayName, "Update check is already running.", ToolTipIcon.Info);
+            }
+
+            return;
+        }
+
+        _checkForUpdatesItem.Enabled = false;
+        try
+        {
+            var checkResult = await _autoUpdater.CheckForUpdateAsync(CancellationToken.None);
+
+            _settings.LastUpdateCheckUtc = DateTimeOffset.UtcNow;
+            _settings.Save(AppPaths.ConfigPath, _logger);
+
+            if (!checkResult.Success)
+            {
+                if (manualCheck)
+                {
+                    _trayIcon.ShowBalloonTip(2600, AppIdentity.DisplayName, "Failed to check for updates.", ToolTipIcon.Error);
+                }
+
+                return;
+            }
+
+            if (!checkResult.UpdateAvailable || checkResult.Release is null)
+            {
+                if (manualCheck)
+                {
+                    _trayIcon.ShowBalloonTip(2200, AppIdentity.DisplayName, "You are already on the latest version.", ToolTipIcon.Info);
+                }
+
+                return;
+            }
+
+            _logger.Info($"Update available: {checkResult.Release.TagName} (current: v{checkResult.CurrentVersion})");
+
+            var shouldInstall = installIfAvailable;
+            if (manualCheck)
+            {
+                var prompt = MessageBox.Show(
+                    $"A new update is available: {checkResult.Release.TagName}\nCurrent version: v{checkResult.CurrentVersion}\n\nDownload and install now?",
+                    AppIdentity.DisplayName,
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Information);
+                shouldInstall = prompt == DialogResult.Yes;
+            }
+            else if (!installIfAvailable)
+            {
+                _trayIcon.ShowBalloonTip(
+                    5000,
+                    AppIdentity.DisplayName,
+                    $"Update available ({checkResult.Release.TagName}). Open tray menu -> Check For Updates...",
+                    ToolTipIcon.Info);
+            }
+
+            if (!shouldInstall)
+            {
+                return;
+            }
+
+            await DownloadAndApplyUpdateAsync(checkResult.Release, manualCheck);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Unexpected failure during update check.", ex);
+            if (manualCheck)
+            {
+                _trayIcon.ShowBalloonTip(2600, AppIdentity.DisplayName, "Unexpected update error.", ToolTipIcon.Error);
+            }
+        }
+        finally
+        {
+            _checkForUpdatesItem.Enabled = true;
+            Interlocked.Exchange(ref _updateOperationInProgress, 0);
+        }
+    }
+
+    private async Task DownloadAndApplyUpdateAsync(UpdateReleaseInfo release, bool manualCheck)
+    {
+        _trayIcon.ShowBalloonTip(1800, AppIdentity.DisplayName, $"Downloading update {release.TagName}...", ToolTipIcon.Info);
+        var download = await _autoUpdater.DownloadUpdateAsync(release, CancellationToken.None);
+        if (!download.Success || string.IsNullOrWhiteSpace(download.DownloadedExePath))
+        {
+            _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Download failed. Update not installed.", ToolTipIcon.Error);
+            return;
+        }
+
+        if (!_autoUpdater.TryLaunchInPlaceUpdate(download.DownloadedExePath, out var launchError))
+        {
+            _trayIcon.ShowBalloonTip(3200, AppIdentity.DisplayName, "Failed to launch updater script.", ToolTipIcon.Error);
+            if (!string.IsNullOrWhiteSpace(launchError))
+            {
+                _logger.Error($"Failed launching updater script: {launchError}");
+            }
+
+            return;
+        }
+
+        _logger.Info($"Applying update {release.TagName} and restarting application.");
+        if (manualCheck)
+        {
+            _trayIcon.ShowBalloonTip(2200, AppIdentity.DisplayName, "Installing update and restarting...", ToolTipIcon.Info);
+        }
+
+        await _engine.StopAsync();
+        ExitThread();
+    }
+
     private async Task ExitAsync()
     {
         try
@@ -325,6 +513,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _toggleInterceptionItem.Text = running ? "Turn Interception Off" : "Turn Interception On";
         _toggleRedirectResolutionItem.Checked = _settings.ResolveRedirects;
         _toggleForwardToBrowserItem.Checked = _settings.ForwardInterceptedLinksToBrowser;
+        _autoUpdateItem.Checked = _settings.AutoUpdateEnabled;
 
         if (string.IsNullOrWhiteSpace(_settings.ForwardBrowserPath))
         {

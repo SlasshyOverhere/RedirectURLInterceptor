@@ -7,6 +7,29 @@ namespace RedirectUrlInterceptor;
 
 internal static class ProtocolInvocationHandler
 {
+    private static readonly HashSet<string> IgnoredInvokerProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "explorer",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "conhost",
+        "rundll32",
+        "svchost",
+        "dllhost",
+        "wscript",
+        "cscript",
+        "msiexec",
+        "runtimebroker",
+        "taskhostw",
+        "backgroundtaskhost",
+        "searchhost",
+        "searchapp",
+        "startmenuexperiencehost",
+        "shellexperiencehost",
+        "applicationframehost"
+    };
+
     public static bool TryHandle(string[] args, FileLogger logger)
     {
         var url = ExtractUrl(args);
@@ -23,6 +46,16 @@ internal static class ProtocolInvocationHandler
         try
         {
             var settings = AppSettings.Load(AppPaths.ConfigPath, logger);
+            var sourceContext = ResolveSourceContext();
+            if (IsExcluded(sourceContext.ExclusionCandidates, settings.ExcludedParentProcesses))
+            {
+                var sourceProcess = string.IsNullOrWhiteSpace(sourceContext.SourceProcessName)
+                    ? "unknown"
+                    : ProcessNameHelper.ToExeName(sourceContext.SourceProcessName);
+                logger.Info($"Skipped protocol capture for excluded app: {sourceProcess}");
+                return true;
+            }
+
             if (settings.ForwardInterceptedLinksToBrowser &&
                 (string.IsNullOrWhiteSpace(settings.ForwardBrowserPath) || !File.Exists(settings.ForwardBrowserPath)))
             {
@@ -43,7 +76,7 @@ internal static class ProtocolInvocationHandler
             }
 
             TrySetClipboard(url);
-            WriteCapture(url, settings.ForwardBrowserPath, settings.ForwardInterceptedLinksToBrowser, logger);
+            WriteCapture(url, settings.ForwardBrowserPath, settings.ForwardInterceptedLinksToBrowser, sourceContext, logger);
             logger.Info($"Protocol URL intercepted and copied: {url}");
             NotificationHelper.ShowTransientInfo(AppIdentity.DisplayName, "Intercepted URL copied to clipboard.");
 
@@ -107,24 +140,136 @@ internal static class ProtocolInvocationHandler
         }
     }
 
-    private static void WriteCapture(string url, string? browserPath, bool forwarded, FileLogger logger)
+    private static SourceContext ResolveSourceContext()
+    {
+        var chain = BuildProcessChain(Environment.ProcessId, maxDepth: 10);
+        if (chain.Count == 0)
+        {
+            return new SourceContext(null, 0, null, 0, []);
+        }
+
+        string selfNormalized;
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            selfNormalized = ProcessNameHelper.Normalize(current.ProcessName);
+        }
+        catch
+        {
+            selfNormalized = ProcessNameHelper.Normalize(AppIdentity.CanonicalId);
+        }
+
+        var sourceNode = chain
+            .Skip(1)
+            .FirstOrDefault(node => IsSourceCandidate(node.NormalizedName, selfNormalized))
+            ?? chain.Skip(1).FirstOrDefault();
+
+        ProcessChainNode? parentNode = null;
+        if (sourceNode is not null)
+        {
+            var sourceIndex = chain.FindIndex(node => node.ProcessId == sourceNode.ProcessId);
+            if (sourceIndex >= 0 && sourceIndex + 1 < chain.Count)
+            {
+                parentNode = chain[sourceIndex + 1];
+            }
+        }
+
+        var exclusionCandidates = chain
+            .Skip(1)
+            .Select(node => node.NormalizedName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return new SourceContext(
+            sourceNode?.Name,
+            sourceNode?.ProcessId ?? 0,
+            parentNode?.Name,
+            parentNode?.ProcessId ?? 0,
+            exclusionCandidates);
+    }
+
+    private static bool IsSourceCandidate(string normalizedProcessName, string selfNormalized)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedProcessName))
+        {
+            return false;
+        }
+
+        if (string.Equals(normalizedProcessName, selfNormalized, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !IgnoredInvokerProcesses.Contains(normalizedProcessName);
+    }
+
+    private static List<ProcessChainNode> BuildProcessChain(int startPid, int maxDepth)
+    {
+        var chain = new List<ProcessChainNode>();
+        var visited = new HashSet<int>();
+        var currentPid = startPid;
+
+        while (currentPid > 0 && maxDepth-- > 0 && visited.Add(currentPid))
+        {
+            var name = TryGetProcessName(currentPid);
+            var parentPid = TryGetParentProcessId(currentPid);
+            chain.Add(new ProcessChainNode(
+                currentPid,
+                parentPid,
+                name,
+                ProcessNameHelper.Normalize(name)));
+
+            if (parentPid <= 0)
+            {
+                break;
+            }
+
+            currentPid = parentPid;
+        }
+
+        return chain;
+    }
+
+    private static bool IsExcluded(IEnumerable<string> candidates, IEnumerable<string> excludedProcesses)
+    {
+        var excluded = excludedProcesses
+            .Select(ProcessNameHelper.Normalize)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (excluded.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            var normalized = ProcessNameHelper.Normalize(candidate);
+            if (!string.IsNullOrWhiteSpace(normalized) && excluded.Contains(normalized))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void WriteCapture(string url, string? browserPath, bool forwarded, SourceContext sourceContext, FileLogger logger)
     {
         try
         {
             using var writer = new JsonlCaptureWriter(AppPaths.LogsDirectory, logger);
 
-            var parentPid = TryGetParentProcessId(Environment.ProcessId);
-            var parentName = parentPid > 0 ? TryGetProcessName(parentPid) : null;
-
             writer.Write(new InterceptRecord
             {
                 TimestampUtc = DateTimeOffset.UtcNow,
-                SourceProcess = ProcessNameHelper.ToExeName(parentName),
-                SourcePid = parentPid,
+                SourceProcess = ProcessNameHelper.ToExeName(sourceContext.SourceProcessName),
+                SourcePid = sourceContext.SourcePid,
                 BrowserProcess = forwarded && !string.IsNullOrWhiteSpace(browserPath) ? Path.GetFileName(browserPath) : string.Empty,
                 BrowserPid = 0,
-                ParentProcess = ProcessNameHelper.ToExeName(parentName),
-                ParentPid = parentPid,
+                ParentProcess = ProcessNameHelper.ToExeName(sourceContext.ParentProcessName),
+                ParentPid = sourceContext.ParentPid,
                 Url = url
             });
         }
@@ -170,6 +315,19 @@ internal static class ProtocolInvocationHandler
             return null;
         }
     }
+
+    private sealed record SourceContext(
+        string? SourceProcessName,
+        int SourcePid,
+        string? ParentProcessName,
+        int ParentPid,
+        IReadOnlyList<string> ExclusionCandidates);
+
+    private sealed record ProcessChainNode(
+        int ProcessId,
+        int ParentProcessId,
+        string? Name,
+        string NormalizedName);
 
     private static void TrySetClipboard(string url)
     {

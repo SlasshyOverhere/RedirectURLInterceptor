@@ -1,10 +1,43 @@
 using System.Diagnostics;
+using System.Management;
 using System.Windows.Forms;
 
 namespace RedirectUrlInterceptor;
 
 internal sealed class ExclusionsForm : Form
 {
+    private static readonly HashSet<string> InfrastructureProcessNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "idle",
+        "system",
+        "registry",
+        "smss",
+        "csrss",
+        "wininit",
+        "services",
+        "lsass",
+        "svchost",
+        "fontdrvhost",
+        "sihost",
+        "winlogon",
+        "dwm",
+        "taskhostw",
+        "runtimebroker",
+        "searchhost",
+        "searchapp",
+        "startmenuexperiencehost",
+        "shellexperiencehost",
+        "applicationframehost",
+        "audiodg",
+        "spoolsv",
+        "wudfhost",
+        "dllhost",
+        "conhost",
+        "rundll32",
+        "wmiadap",
+        "wmiprvse"
+    };
+
     private readonly CheckedListBox _runningAppsList = new()
     {
         CheckOnClick = true,
@@ -20,6 +53,9 @@ internal sealed class ExclusionsForm : Form
     };
 
     private readonly HashSet<string> _initialExcluded;
+    private readonly HashSet<string> _currentRunningApps = new(StringComparer.OrdinalIgnoreCase);
+    private bool _syncingManualInput;
+    private bool _manualInputEdited;
 
     public ExclusionsForm(IEnumerable<string> currentExclusions)
     {
@@ -54,7 +90,7 @@ internal sealed class ExclusionsForm : Form
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            Text = "Select apps you want to ignore when they open browser redirect URLs."
+            Text = "Select apps you want to ignore when they open browser redirect URLs. Helper/background processes are included."
         };
 
         var refreshButton = new Button
@@ -70,8 +106,13 @@ internal sealed class ExclusionsForm : Form
             AutoSize = true,
             Text = "Manual entries (one app per line, with or without .exe):"
         };
-
-        _manualInput.Text = string.Join(Environment.NewLine, _initialExcluded.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+        _manualInput.TextChanged += (_, _) =>
+        {
+            if (!_syncingManualInput)
+            {
+                _manualInputEdited = true;
+            }
+        };
 
         var actionPanel = new FlowLayoutPanel
         {
@@ -117,6 +158,8 @@ internal sealed class ExclusionsForm : Form
     private void PopulateRunningApps()
     {
         var running = GetRunningAppNames();
+        _currentRunningApps.Clear();
+        _currentRunningApps.UnionWith(running);
 
         _runningAppsList.BeginUpdate();
         try
@@ -134,6 +177,11 @@ internal sealed class ExclusionsForm : Form
         finally
         {
             _runningAppsList.EndUpdate();
+        }
+
+        if (!_manualInputEdited)
+        {
+            SyncManualInputFromInitialExclusions();
         }
     }
 
@@ -163,9 +211,29 @@ internal sealed class ExclusionsForm : Form
         Close();
     }
 
+    private void SyncManualInputFromInitialExclusions()
+    {
+        var manualOnly = _initialExcluded
+            .Where(name => !_currentRunningApps.Contains(name))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase);
+
+        _syncingManualInput = true;
+        try
+        {
+            _manualInput.Text = string.Join(Environment.NewLine, manualOnly);
+        }
+        finally
+        {
+            _syncingManualInput = false;
+        }
+    }
+
     private static List<string> GetRunningAppNames()
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visibleProcessIds = new HashSet<int>();
+        var sessionProcessIds = new HashSet<int>();
+        var currentSessionId = TryGetCurrentSessionId();
 
         foreach (var process in Process.GetProcesses())
         {
@@ -176,19 +244,28 @@ internal sealed class ExclusionsForm : Form
                     continue;
                 }
 
-                // Show desktop-visible applications to keep the list practical.
-                if (process.MainWindowHandle == IntPtr.Zero && string.IsNullOrWhiteSpace(process.MainWindowTitle))
+                if (process.SessionId != currentSessionId)
                 {
                     continue;
+                }
+
+                sessionProcessIds.Add(process.Id);
+                if (process.MainWindowHandle != IntPtr.Zero || !string.IsNullOrWhiteSpace(process.MainWindowTitle))
+                {
+                    visibleProcessIds.Add(process.Id);
                 }
 
                 var normalized = ProcessNameHelper.Normalize(process.ProcessName);
-                if (string.IsNullOrWhiteSpace(normalized))
+                if (IsCandidateProcessName(normalized))
                 {
-                    continue;
+                    result.Add(normalized);
                 }
 
-                result.Add(normalized);
+                var exeName = TryGetExecutableName(process);
+                if (IsCandidateProcessName(exeName))
+                {
+                    result.Add(exeName);
+                }
             }
             catch
             {
@@ -200,7 +277,126 @@ internal sealed class ExclusionsForm : Form
             }
         }
 
+        var snapshots = SnapshotProcesses();
+        if (snapshots.Count > 0)
+        {
+            var candidatePids = new HashSet<int>(sessionProcessIds);
+
+            foreach (var snapshot in snapshots.Values)
+            {
+                if (visibleProcessIds.Contains(snapshot.ProcessId))
+                {
+                    candidatePids.Add(snapshot.ProcessId);
+                    if (snapshot.ParentProcessId > 0)
+                    {
+                        candidatePids.Add(snapshot.ParentProcessId);
+                    }
+                }
+
+                if (visibleProcessIds.Contains(snapshot.ParentProcessId))
+                {
+                    candidatePids.Add(snapshot.ProcessId);
+                    candidatePids.Add(snapshot.ParentProcessId);
+                }
+            }
+
+            foreach (var pid in candidatePids)
+            {
+                if (!snapshots.TryGetValue(pid, out var snapshot))
+                {
+                    continue;
+                }
+
+                var normalized = ProcessNameHelper.Normalize(snapshot.Name);
+                if (IsCandidateProcessName(normalized))
+                {
+                    result.Add(normalized);
+                }
+            }
+        }
+
         return result.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static int TryGetCurrentSessionId()
+    {
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            return current.SessionId;
+        }
+        catch
+        {
+            return 1;
+        }
+    }
+
+    private static string TryGetExecutableName(Process process)
+    {
+        try
+        {
+            return ProcessNameHelper.Normalize(process.MainModule?.FileName);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static Dictionary<int, ProcessSnapshot> SnapshotProcesses()
+    {
+        var snapshot = new Dictionary<int, ProcessSnapshot>();
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, Name FROM Win32_Process");
+            using var results = searcher.Get();
+            foreach (ManagementObject row in results)
+            {
+                var processId = ReadInt(row["ProcessId"]);
+                if (processId <= 0)
+                {
+                    continue;
+                }
+
+                var parentProcessId = ReadInt(row["ParentProcessId"]);
+                var name = row["Name"] as string ?? string.Empty;
+                snapshot[processId] = new ProcessSnapshot(processId, parentProcessId, name);
+            }
+        }
+        catch
+        {
+            // Fall back to Process.GetProcesses() data only.
+        }
+
+        return snapshot;
+    }
+
+    private static int ReadInt(object? value)
+    {
+        if (value is null)
+        {
+            return 0;
+        }
+
+        return value switch
+        {
+            int direct => direct,
+            uint direct => unchecked((int)direct),
+            long direct => unchecked((int)direct),
+            ulong direct => unchecked((int)direct),
+            _ => Convert.ToInt32(value)
+        };
+    }
+
+    private static bool IsCandidateProcessName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        return !InfrastructureProcessNames.Contains(name);
     }
 
     private static IEnumerable<string> ParseManualEntries(string input)
@@ -216,4 +412,6 @@ internal sealed class ExclusionsForm : Form
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
+
+    private readonly record struct ProcessSnapshot(int ProcessId, int ParentProcessId, string Name);
 }

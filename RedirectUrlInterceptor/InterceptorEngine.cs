@@ -191,7 +191,7 @@ internal sealed class InterceptorEngine : IDisposable
             var sourceProcessNormalized = ProcessNameHelper.Normalize(evt.ProcessName);
             var parentProcessNormalized = ProcessNameHelper.Normalize(evt.ParentProcessName);
 
-            if (IsExcluded(sourceProcessNormalized, parentProcessNormalized))
+            if (IsExcluded(sourceProcessNormalized, parentProcessNormalized, evt.ParentProcessId))
             {
                 return;
             }
@@ -241,9 +241,14 @@ internal sealed class InterceptorEngine : IDisposable
         }
     }
 
-    private bool IsExcluded(string sourceProcessName, string parentProcessName)
+    private bool IsExcluded(string sourceProcessName, string parentProcessName, int parentProcessId)
     {
         var excludedSnapshot = Volatile.Read(ref _excludedParents);
+        if (excludedSnapshot.Count == 0)
+        {
+            return false;
+        }
+
         if (!string.IsNullOrWhiteSpace(sourceProcessName) && excludedSnapshot.Contains(sourceProcessName))
         {
             return true;
@@ -254,7 +259,54 @@ internal sealed class InterceptorEngine : IDisposable
             return true;
         }
 
+        // Walk a few levels up to catch launcher/helper chains.
+        var currentPid = parentProcessId;
+        var visited = new HashSet<int>();
+        for (var depth = 0; depth < 3 && currentPid > 0 && visited.Add(currentPid); depth++)
+        {
+            currentPid = TryGetParentProcessId(currentPid);
+            if (currentPid <= 0)
+            {
+                break;
+            }
+
+            var ancestorName = ProcessNameHelper.Normalize(_processNameCache.TryGetName(currentPid));
+            if (!string.IsNullOrWhiteSpace(ancestorName) && excludedSnapshot.Contains(ancestorName))
+            {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private static int TryGetParentProcessId(int processId)
+    {
+        if (processId <= 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT ParentProcessId FROM Win32_Process WHERE ProcessId = {processId}");
+            using var results = searcher.Get();
+            foreach (ManagementObject result in results)
+            {
+                var value = result["ParentProcessId"];
+                if (value is not null)
+                {
+                    return Convert.ToInt32(value);
+                }
+            }
+        }
+        catch
+        {
+            return 0;
+        }
+
+        return 0;
     }
 
     private RedirectResolver GetOrCreateResolver()

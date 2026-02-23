@@ -10,6 +10,8 @@ internal static class AppPaths
 
     public static string LogsDirectory => Path.Combine(DataDirectory, "logs");
 
+    public static string UpdatesDirectory => Path.Combine(DataDirectory, "updates");
+
     public static string ConfigPath => Path.Combine(DataDirectory, "config.json");
 
     public static string AppLogPath => Path.Combine(DataDirectory, "app.log");
@@ -18,6 +20,7 @@ internal static class AppPaths
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(LogsDirectory);
+        Directory.CreateDirectory(UpdatesDirectory);
     }
 
     public static void CleanupLegacyData(FileLogger logger)

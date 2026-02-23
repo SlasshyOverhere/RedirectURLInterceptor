@@ -6,6 +6,12 @@ internal static class AppIdentity
 
     public const string CanonicalId = "SlasshyUrlInterceptor";
 
+    public const string GitHubOwner = "SlasshyOverhere";
+
+    public const string GitHubRepository = "RedirectURLInterceptor";
+
+    public const string ReleaseAssetExeName = "SlasshyUrlInterceptor.exe";
+
     public const string ProgId = "SlasshyUrlInterceptor.Url";
 
     public const string LegacyDisplayName = "Redirect URL Interceptor";

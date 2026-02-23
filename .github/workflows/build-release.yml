@@ -19,7 +19,9 @@ jobs:
     env:
       PROJECT_PATH: RedirectUrlInterceptor/RedirectUrlInterceptor.csproj
       PUBLISH_DIR: RedirectUrlInterceptor/out/publish
+      APP_EXE_PATH: RedirectUrlInterceptor/out/publish/SlasshyUrlInterceptor.exe
       ZIP_PATH: RedirectUrlInterceptor/out/SlasshyUrlInterceptor-win-x64.zip
+      CHECKSUM_PATH: RedirectUrlInterceptor/out/SlasshyUrlInterceptor.exe.sha256
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,13 +33,45 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Determine build version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not "${{ github.ref }}".StartsWith("refs/tags/")) {
+            $run = [int]"${{ github.run_number }}"
+            if ($run -gt 65535) {
+              $run = $run % 65535
+            }
+            $tag = "v0.0.$run"
+          }
+
+          $version = $tag.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "Tag '$tag' must use numeric semantic version format, e.g. v1.2.3"
+          }
+
+          if ($version.Split('.').Count -eq 3) {
+            $version = "$version.0"
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Using assembly version $version from $tag"
+
       - name: Restore
         shell: pwsh
         run: dotnet restore $env:PROJECT_PATH
 
       - name: Build
         shell: pwsh
-        run: dotnet build $env:PROJECT_PATH -c Release --no-restore
+        run: |
+          dotnet build $env:PROJECT_PATH `
+            -c Release `
+            --no-restore `
+            /p:Version=${{ steps.version.outputs.version }} `
+            /p:FileVersion=${{ steps.version.outputs.version }} `
+            /p:InformationalVersion=${{ steps.version.outputs.tag }}
 
       - name: Publish EXE
         shell: pwsh
@@ -51,6 +85,9 @@ jobs:
             /p:IncludeNativeLibrariesForSelfExtract=true `
             /p:DebugType=None `
             /p:DebugSymbols=false `
+            /p:Version=${{ steps.version.outputs.version }} `
+            /p:FileVersion=${{ steps.version.outputs.version }} `
+            /p:InformationalVersion=${{ steps.version.outputs.tag }} `
             -o $env:PUBLISH_DIR
 
       - name: Create ZIP package
@@ -61,13 +98,20 @@ jobs:
           }
           Compress-Archive -Path "$env:PUBLISH_DIR/*" -DestinationPath $env:ZIP_PATH -CompressionLevel Optimal
 
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Path $env:APP_EXE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path $env:CHECKSUM_PATH -Value "$hash  SlasshyUrlInterceptor.exe" -NoNewline
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: SlasshyUrlInterceptor-win-x64
           path: |
             ${{ env.ZIP_PATH }}
-            ${{ env.PUBLISH_DIR }}/SlasshyUrlInterceptor.exe
+            ${{ env.APP_EXE_PATH }}
+            ${{ env.CHECKSUM_PATH }}
           if-no-files-found: error
 
       - name: Compute release metadata
@@ -127,6 +171,7 @@ jobs:
           ### Build Output
           - `SlasshyUrlInterceptor.exe` (win-x64, self-contained, single-file)
           - `SlasshyUrlInterceptor-win-x64.zip` (full publish folder)
+          - `SlasshyUrlInterceptor.exe.sha256` (integrity checksum)
 
           ### Build Metadata
           - Commit: $shortSha
@@ -147,7 +192,8 @@ jobs:
           body_path: release-notes.md
           files: |
             ${{ env.ZIP_PATH }}
-            ${{ env.PUBLISH_DIR }}/SlasshyUrlInterceptor.exe
+            ${{ env.APP_EXE_PATH }}
+            ${{ env.CHECKSUM_PATH }}
 
       - name: Verify release exists
         if: startsWith(github.ref, 'refs/tags/')

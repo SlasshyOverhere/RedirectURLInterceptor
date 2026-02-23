@@ -35,6 +35,10 @@ internal sealed class AppSettings
 
     public bool ForwardInterceptedLinksToBrowser { get; set; } = true;
 
+    public bool AutoUpdateEnabled { get; set; } = true;
+
+    public DateTimeOffset? LastUpdateCheckUtc { get; set; }
+
     public static AppSettings Load(string path, FileLogger logger)
     {
         try
@@ -91,6 +95,14 @@ internal sealed class AppSettings
         if (!string.IsNullOrWhiteSpace(ForwardBrowserPath))
         {
             ForwardBrowserPath = ForwardBrowserPath.Trim();
+        }
+
+        if (LastUpdateCheckUtc is { } checkedAt)
+        {
+            if (checkedAt < DateTimeOffset.UnixEpoch || checkedAt > DateTimeOffset.UtcNow.AddMinutes(5))
+            {
+                LastUpdateCheckUtc = null;
+            }
         }
     }
 }
