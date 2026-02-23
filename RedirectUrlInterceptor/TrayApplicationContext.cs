@@ -24,6 +24,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _forwardBrowserItem;
     private readonly ToolStripMenuItem _autoUpdateItem;
     private readonly ToolStripMenuItem _checkForUpdatesItem;
+    private readonly ToolStripMenuItem _reinstallFromReleaseItem;
 
     private AppSettings _settings;
     private readonly SynchronizationContext _uiContext;
@@ -87,6 +88,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _checkForUpdatesItem = new ToolStripMenuItem("Check For Updates...");
         _checkForUpdatesItem.Click += async (_, _) => await CheckForUpdatesAsync(manualCheck: true, installIfAvailable: false);
 
+        _reinstallFromReleaseItem = new ToolStripMenuItem("Reinstall From Latest Release...");
+        _reinstallFromReleaseItem.Click += async (_, _) => await ReinstallFromLatestReleaseAsync();
+
         _startupItem = new ToolStripMenuItem("Launch At Startup")
         {
             Checked = StartupManager.IsEnabled(),
@@ -113,6 +117,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(openDefaultAppsItem);
         menu.Items.Add(_autoUpdateItem);
         menu.Items.Add(_checkForUpdatesItem);
+        menu.Items.Add(_reinstallFromReleaseItem);
         menu.Items.Add(_startupItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(openLogsItem);
@@ -391,6 +396,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _checkForUpdatesItem.Enabled = false;
+        _reinstallFromReleaseItem.Enabled = false;
         try
         {
             var checkResult = await _autoUpdater.CheckForUpdateAsync(CancellationToken.None);
@@ -457,6 +463,52 @@ internal sealed class TrayApplicationContext : ApplicationContext
         finally
         {
             _checkForUpdatesItem.Enabled = true;
+            _reinstallFromReleaseItem.Enabled = true;
+            Interlocked.Exchange(ref _updateOperationInProgress, 0);
+        }
+    }
+
+    private async Task ReinstallFromLatestReleaseAsync()
+    {
+        if (Interlocked.Exchange(ref _updateOperationInProgress, 1) == 1)
+        {
+            _trayIcon.ShowBalloonTip(1800, AppIdentity.DisplayName, "Another update operation is already running.", ToolTipIcon.Info);
+            return;
+        }
+
+        _checkForUpdatesItem.Enabled = false;
+        _reinstallFromReleaseItem.Enabled = false;
+        try
+        {
+            var confirm = MessageBox.Show(
+                "This will reinstall the app from the latest GitHub release, even if the version is the same.\n\nContinue?",
+                AppIdentity.DisplayName,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
+            var latestResult = await _autoUpdater.GetLatestReleaseAsync(CancellationToken.None);
+            if (!latestResult.Success || latestResult.Release is null)
+            {
+                _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Could not load latest release metadata.", ToolTipIcon.Error);
+                return;
+            }
+
+            _logger.Info($"Manual reinstall requested from release {latestResult.Release.TagName}.");
+            await DownloadAndApplyUpdateAsync(latestResult.Release, manualCheck: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Unexpected failure during reinstall operation.", ex);
+            _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Reinstall failed unexpectedly.", ToolTipIcon.Error);
+        }
+        finally
+        {
+            _checkForUpdatesItem.Enabled = true;
+            _reinstallFromReleaseItem.Enabled = true;
             Interlocked.Exchange(ref _updateOperationInProgress, 0);
         }
     }

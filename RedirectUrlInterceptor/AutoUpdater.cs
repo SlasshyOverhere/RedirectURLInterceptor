@@ -56,6 +56,29 @@ internal sealed class AutoUpdater
         }
     }
 
+    public async Task<LatestReleaseResult> GetLatestReleaseAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var latestRelease = await FetchLatestReleaseAsync(cancellationToken).ConfigureAwait(false);
+            if (latestRelease is null)
+            {
+                return LatestReleaseResult.Fail("No stable GitHub release is currently available.");
+            }
+
+            return LatestReleaseResult.Ok(latestRelease);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error("Failed loading latest release metadata.", ex);
+            return LatestReleaseResult.Fail(ex.Message);
+        }
+    }
+
     public async Task<UpdateDownloadResult> DownloadUpdateAsync(UpdateReleaseInfo release, CancellationToken cancellationToken)
     {
         try
@@ -456,6 +479,19 @@ internal sealed record UpdateDownloadResult(bool Success, string? DownloadedExeP
     public static UpdateDownloadResult Fail(string errorMessage)
     {
         return new UpdateDownloadResult(false, null, errorMessage);
+    }
+}
+
+internal sealed record LatestReleaseResult(bool Success, UpdateReleaseInfo? Release, string? ErrorMessage)
+{
+    public static LatestReleaseResult Ok(UpdateReleaseInfo release)
+    {
+        return new LatestReleaseResult(true, release, null);
+    }
+
+    public static LatestReleaseResult Fail(string errorMessage)
+    {
+        return new LatestReleaseResult(false, null, errorMessage);
     }
 }
 

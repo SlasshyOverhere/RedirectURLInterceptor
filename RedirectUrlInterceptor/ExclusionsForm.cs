@@ -76,6 +76,7 @@ internal sealed class ExclusionsForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
+            RowCount = 6,
             Padding = new Padding(10)
         };
 
@@ -114,18 +115,22 @@ internal sealed class ExclusionsForm : Form
             }
         };
 
-        var actionPanel = new FlowLayoutPanel
+        var actionPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            AutoSize = true
+            ColumnCount = 3,
+            RowCount = 1
         };
+        actionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        actionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        actionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var saveButton = new Button
         {
             Text = "Save",
             AutoSize = true
         };
+        saveButton.Margin = new Padding(0, 0, 8, 0);
         saveButton.Click += (_, _) => SaveAndClose();
 
         var cancelButton = new Button
@@ -139,17 +144,19 @@ internal sealed class ExclusionsForm : Form
             Close();
         };
 
-        actionPanel.Controls.Add(saveButton);
-        actionPanel.Controls.Add(cancelButton);
+        actionPanel.Controls.Add(saveButton, 1, 0);
+        actionPanel.Controls.Add(cancelButton, 2, 0);
 
-        root.Controls.Add(intro);
-        root.Controls.Add(_runningAppsList);
-        root.Controls.Add(refreshButton);
-        root.Controls.Add(manualLabel);
-        root.Controls.Add(_manualInput);
-        root.Controls.Add(actionPanel);
+        root.Controls.Add(intro, 0, 0);
+        root.Controls.Add(_runningAppsList, 0, 1);
+        root.Controls.Add(refreshButton, 0, 2);
+        root.Controls.Add(manualLabel, 0, 3);
+        root.Controls.Add(_manualInput, 0, 4);
+        root.Controls.Add(actionPanel, 0, 5);
 
         Controls.Add(root);
+        AcceptButton = saveButton;
+        CancelButton = cancelButton;
         PopulateRunningApps();
     }
 

@@ -49,6 +49,7 @@ Many apps trigger browser redirects for sign-in, preset downloads, OAuth flows, 
 - `Open Default Apps Settings`
 - `Enable Auto Update`
 - `Check For Updates...`
+- `Reinstall From Latest Release...`
 - `Resolve Redirect Chain`
 - `Launch At Startup`
 - `Open Logs Folder`
