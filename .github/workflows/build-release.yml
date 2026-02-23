@@ -39,11 +39,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           if (-not "${{ github.ref }}".StartsWith("refs/tags/")) {
-            $run = [int]"${{ github.run_number }}"
-            if ($run -gt 65535) {
-              $run = $run % 65535
-            }
-            $tag = "v0.0.$run"
+            $tag = "v0.0.${{ github.run_number }}"
           }
 
           $version = $tag.TrimStart('v')
@@ -115,41 +111,74 @@ jobs:
           if-no-files-found: error
 
       - name: Compute release metadata
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
         id: release_meta
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $isEarlyBeta = $tag -match '^v0\.'
-          "prerelease=false" >> $env:GITHUB_OUTPUT
+          $isTagPush = "${{ startsWith(github.ref, 'refs/tags/') }}"
+          if ($isTagPush -eq "true") {
+            $tag = "${{ github.ref_name }}"
+            $isEarlyBeta = $tag -match '^v0\.'
+            "prerelease=false" >> $env:GITHUB_OUTPUT
 
-          if ($isEarlyBeta) {
-            "release_name=Slasshy Url Interceptor $tag (Early Beta)" >> $env:GITHUB_OUTPUT
-            "channel=Early Beta" >> $env:GITHUB_OUTPUT
+            if ($isEarlyBeta) {
+              "release_name=Slasshy Url Interceptor $tag (Early Beta)" >> $env:GITHUB_OUTPUT
+              "channel=Early Beta" >> $env:GITHUB_OUTPUT
+            } else {
+              "release_name=Slasshy Url Interceptor $tag" >> $env:GITHUB_OUTPUT
+              "channel=Stable" >> $env:GITHUB_OUTPUT
+            }
           } else {
-            "release_name=Slasshy Url Interceptor $tag" >> $env:GITHUB_OUTPUT
-            "channel=Stable" >> $env:GITHUB_OUTPUT
+            $tag = "v0.0.${{ github.run_number }}"
+            "prerelease=false" >> $env:GITHUB_OUTPUT
+            "release_name=Slasshy Url Interceptor $tag (Auto Main Build)" >> $env:GITHUB_OUTPUT
+            "channel=Auto Main" >> $env:GITHUB_OUTPUT
           }
 
+          "release_tag=$tag" >> $env:GITHUB_OUTPUT
+          "is_tag_push=$isTagPush" >> $env:GITHUB_OUTPUT
+
       - name: Generate release notes
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $currentTag = "${{ github.ref_name }}"
+          $currentTag = "${{ steps.release_meta.outputs.release_tag }}"
+          $isTagPush = "${{ steps.release_meta.outputs.is_tag_push }}"
           git fetch --tags --force
 
-          $previousTag = $null
-          try {
-            $previousTag = (git describe --tags --abbrev=0 "$currentTag^" 2>$null).Trim()
-          } catch {
+          if ($isTagPush -eq "true") {
             $previousTag = $null
-          }
+            try {
+              $previousTag = (git describe --tags --abbrev=0 "$currentTag^" 2>$null).Trim()
+            } catch {
+              $previousTag = $null
+            }
 
-          if ([string]::IsNullOrWhiteSpace($previousTag)) {
-            $range = $currentTag
+            if ([string]::IsNullOrWhiteSpace($previousTag)) {
+              $range = $currentTag
+            } else {
+              $range = "$previousTag..$currentTag"
+            }
           } else {
-            $range = "$previousTag..$currentTag"
+            $previousTag = $null
+            try {
+              $previousTag = (git describe --tags --abbrev=0 2>$null).Trim()
+            } catch {
+              $previousTag = $null
+            }
+
+            if ([string]::IsNullOrWhiteSpace($previousTag)) {
+              $range = $null
+              try {
+                $null = git rev-parse --verify HEAD~1
+                $range = "HEAD~1..HEAD"
+              } catch {
+                $range = "HEAD"
+              }
+            } else {
+              $range = "$previousTag..HEAD"
+            }
           }
 
           $changes = git log --no-merges --pretty=format:"- %s (%h)" $range
@@ -182,12 +211,13 @@ jobs:
           $notes | Out-File -FilePath release-notes.md -Encoding utf8
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.release_meta.outputs.release_name }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ steps.release_meta.outputs.prerelease }}
           body_path: release-notes.md
           files: |
@@ -196,10 +226,10 @@ jobs:
             ${{ env.CHECKSUM_PATH }}
 
       - name: Verify release exists
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ steps.release_meta.outputs.release_tag }}"
           $url = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag"
           $headers = @{
             Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
