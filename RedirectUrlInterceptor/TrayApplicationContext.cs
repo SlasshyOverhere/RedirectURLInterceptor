@@ -397,8 +397,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _checkForUpdatesItem.Enabled = false;
         _reinstallFromReleaseItem.Enabled = false;
+        UpdateProgressForm? progressForm = null;
         try
         {
+            if (manualCheck)
+            {
+                progressForm = new UpdateProgressForm();
+                progressForm.Show();
+                progressForm.SetStatus("Checking for updates...");
+            }
+
             var checkResult = await _autoUpdater.CheckForUpdateAsync(CancellationToken.None);
 
             _settings.LastUpdateCheckUtc = DateTimeOffset.UtcNow;
@@ -406,6 +414,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             if (!checkResult.Success)
             {
+                progressForm?.SetStatus("Update check failed.", detail: checkResult.ErrorMessage);
                 if (manualCheck)
                 {
                     _trayIcon.ShowBalloonTip(2600, AppIdentity.DisplayName, "Failed to check for updates.", ToolTipIcon.Error);
@@ -416,6 +425,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             if (!checkResult.UpdateAvailable || checkResult.Release is null)
             {
+                progressForm?.SetStatus("You are already on the latest version.", detail: $"Current: v{checkResult.CurrentVersion}");
                 if (manualCheck)
                 {
                     _trayIcon.ShowBalloonTip(2200, AppIdentity.DisplayName, "You are already on the latest version.", ToolTipIcon.Info);
@@ -447,14 +457,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
             if (!shouldInstall)
             {
+                progressForm?.SetStatus("Update available but not installed.", detail: checkResult.Release.TagName);
                 return;
             }
 
-            await DownloadAndApplyUpdateAsync(checkResult.Release, manualCheck);
+            await DownloadAndApplyUpdateAsync(checkResult.Release, manualCheck, progressForm);
         }
         catch (Exception ex)
         {
             _logger.Error("Unexpected failure during update check.", ex);
+            progressForm?.SetStatus("Unexpected update error.", detail: ex.Message);
             if (manualCheck)
             {
                 _trayIcon.ShowBalloonTip(2600, AppIdentity.DisplayName, "Unexpected update error.", ToolTipIcon.Error);
@@ -462,6 +474,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         finally
         {
+            if (progressForm is not null && !progressForm.IsDisposed)
+            {
+                progressForm.Close();
+                progressForm.Dispose();
+            }
+
             _checkForUpdatesItem.Enabled = true;
             _reinstallFromReleaseItem.Enabled = true;
             Interlocked.Exchange(ref _updateOperationInProgress, 0);
@@ -478,6 +496,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _checkForUpdatesItem.Enabled = false;
         _reinstallFromReleaseItem.Enabled = false;
+        UpdateProgressForm? progressForm = null;
         try
         {
             var confirm = MessageBox.Show(
@@ -490,41 +509,61 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 return;
             }
 
+            progressForm = new UpdateProgressForm();
+            progressForm.Show();
+            progressForm.SetStatus("Loading latest release...");
+
             var latestResult = await _autoUpdater.GetLatestReleaseAsync(CancellationToken.None);
             if (!latestResult.Success || latestResult.Release is null)
             {
+                progressForm?.SetStatus("Could not load latest release metadata.", detail: latestResult.ErrorMessage);
                 _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Could not load latest release metadata.", ToolTipIcon.Error);
                 return;
             }
 
             _logger.Info($"Manual reinstall requested from release {latestResult.Release.TagName}.");
-            await DownloadAndApplyUpdateAsync(latestResult.Release, manualCheck: true);
+            await DownloadAndApplyUpdateAsync(latestResult.Release, manualCheck: true, progressForm);
         }
         catch (Exception ex)
         {
             _logger.Error("Unexpected failure during reinstall operation.", ex);
+            progressForm?.SetStatus("Reinstall failed.", detail: ex.Message);
             _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Reinstall failed unexpectedly.", ToolTipIcon.Error);
         }
         finally
         {
+            if (progressForm is not null && !progressForm.IsDisposed)
+            {
+                progressForm.Close();
+                progressForm.Dispose();
+            }
+
             _checkForUpdatesItem.Enabled = true;
             _reinstallFromReleaseItem.Enabled = true;
             Interlocked.Exchange(ref _updateOperationInProgress, 0);
         }
     }
 
-    private async Task DownloadAndApplyUpdateAsync(UpdateReleaseInfo release, bool manualCheck)
+    private async Task DownloadAndApplyUpdateAsync(UpdateReleaseInfo release, bool manualCheck, UpdateProgressForm? progressForm = null)
     {
+        progressForm?.SetStatus($"Downloading update {release.TagName}...");
         _trayIcon.ShowBalloonTip(1800, AppIdentity.DisplayName, $"Downloading update {release.TagName}...", ToolTipIcon.Info);
-        var download = await _autoUpdater.DownloadUpdateAsync(release, CancellationToken.None);
+        var progress = progressForm is null
+            ? null
+            : new Progress<UpdateDownloadProgress>(progressForm.Apply);
+
+        var download = await _autoUpdater.DownloadUpdateAsync(release, CancellationToken.None, progress);
         if (!download.Success || string.IsNullOrWhiteSpace(download.DownloadedExePath))
         {
+            progressForm?.SetStatus("Download failed.", detail: download.ErrorMessage);
             _trayIcon.ShowBalloonTip(3000, AppIdentity.DisplayName, "Download failed. Update not installed.", ToolTipIcon.Error);
             return;
         }
 
+        progressForm?.SetStatus("Applying update and preparing restart...");
         if (!_autoUpdater.TryLaunchInPlaceUpdate(download.DownloadedExePath, out var launchError))
         {
+            progressForm?.SetStatus("Failed to launch updater script.", detail: launchError);
             _trayIcon.ShowBalloonTip(3200, AppIdentity.DisplayName, "Failed to launch updater script.", ToolTipIcon.Error);
             if (!string.IsNullOrWhiteSpace(launchError))
             {
@@ -535,6 +574,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _logger.Info($"Applying update {release.TagName} and restarting application.");
+        progressForm?.SetStatus("Installing update and restarting...");
         if (manualCheck)
         {
             _trayIcon.ShowBalloonTip(2200, AppIdentity.DisplayName, "Installing update and restarting...", ToolTipIcon.Info);

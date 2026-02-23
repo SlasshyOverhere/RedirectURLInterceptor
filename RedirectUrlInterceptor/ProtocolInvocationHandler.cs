@@ -46,6 +46,8 @@ internal static class ProtocolInvocationHandler
         try
         {
             var settings = AppSettings.Load(AppPaths.ConfigPath, logger);
+            EnsureForwardBrowserConfigured(settings, logger);
+
             var sourceContext = ResolveSourceContext();
             if (IsExcluded(sourceContext.ExclusionCandidates, settings.ExcludedParentProcesses))
             {
@@ -53,14 +55,17 @@ internal static class ProtocolInvocationHandler
                     ? "unknown"
                     : ProcessNameHelper.ToExeName(sourceContext.SourceProcessName);
                 logger.Info($"Skipped protocol capture for excluded app: {sourceProcess}");
-                return true;
-            }
 
-            if (settings.ForwardInterceptedLinksToBrowser &&
-                (string.IsNullOrWhiteSpace(settings.ForwardBrowserPath) || !File.Exists(settings.ForwardBrowserPath)))
-            {
-                settings.ForwardBrowserPath = BrowserLocator.TryFindFirstInstalled();
-                settings.Save(AppPaths.ConfigPath, logger);
+                if (!string.IsNullOrWhiteSpace(settings.ForwardBrowserPath) && File.Exists(settings.ForwardBrowserPath))
+                {
+                    LaunchBrowser(settings.ForwardBrowserPath, url, logger);
+                }
+                else
+                {
+                    logger.Error("Excluded app bypass could not launch browser because no browser path is configured.");
+                }
+
+                return true;
             }
 
             if (settings.ForwardInterceptedLinksToBrowser &&
@@ -91,6 +96,17 @@ internal static class ProtocolInvocationHandler
         }
 
         return true;
+    }
+
+    private static void EnsureForwardBrowserConfigured(AppSettings settings, FileLogger logger)
+    {
+        if (!string.IsNullOrWhiteSpace(settings.ForwardBrowserPath) && File.Exists(settings.ForwardBrowserPath))
+        {
+            return;
+        }
+
+        settings.ForwardBrowserPath = BrowserLocator.TryFindFirstInstalled();
+        settings.Save(AppPaths.ConfigPath, logger);
     }
 
     private static string? ExtractUrl(IEnumerable<string> args)

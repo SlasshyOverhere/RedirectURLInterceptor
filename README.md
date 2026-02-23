@@ -29,6 +29,7 @@ Many apps trigger browser redirects for sign-in, preset downloads, OAuth flows, 
 - Optional redirect-chain resolution.
 - Optional browser forwarding after interception.
 - Auto update from GitHub Releases.
+- Update progress window (status + download progress).
 - JSONL logging for machine-readable history.
 
 ## Quick start (recommended)
@@ -69,7 +70,11 @@ Files:
 - `config.json` for settings.
 - `app.log` for runtime/status logs.
 - `logs\intercepts-YYYYMMDD.jsonl` for captured URL records.
-- `updates\` temporary files used by auto-update/install.
+
+Update workspace:
+
+- `C:\SlasshyUrlInterceptor\updates` (preferred updater workspace).
+- Falls back to `%LocalAppData%\SlasshyUrlInterceptor\updates` if `C:\` is unavailable.
 
 Example JSONL record:
 

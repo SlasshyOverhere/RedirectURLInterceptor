@@ -2,6 +2,8 @@ namespace RedirectUrlInterceptor;
 
 internal static class AppPaths
 {
+    private static readonly string ResolvedUpdatesDirectory = ResolveUpdatesDirectory();
+
     public static string DataDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppIdentity.DataFolderName);
 
@@ -10,7 +12,10 @@ internal static class AppPaths
 
     public static string LogsDirectory => Path.Combine(DataDirectory, "logs");
 
-    public static string UpdatesDirectory => Path.Combine(DataDirectory, "updates");
+    public static string UpdateWorkspaceRootDirectory =>
+        Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", AppIdentity.DataFolderName);
+
+    public static string UpdatesDirectory => ResolvedUpdatesDirectory;
 
     public static string ConfigPath => Path.Combine(DataDirectory, "config.json");
 
@@ -38,6 +43,36 @@ internal static class AppPaths
         catch (Exception ex)
         {
             logger.Error("Failed to remove legacy data folder.", ex);
+        }
+    }
+
+    private static string ResolveUpdatesDirectory()
+    {
+        var preferred = Path.Combine(UpdateWorkspaceRootDirectory, "updates");
+        if (TryCreateDirectory(preferred))
+        {
+            return preferred;
+        }
+
+        var fallback = Path.Combine(DataDirectory, "updates");
+        if (TryCreateDirectory(fallback))
+        {
+            return fallback;
+        }
+
+        return fallback;
+    }
+
+    private static bool TryCreateDirectory(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

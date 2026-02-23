@@ -79,7 +79,10 @@ internal sealed class AutoUpdater
         }
     }
 
-    public async Task<UpdateDownloadResult> DownloadUpdateAsync(UpdateReleaseInfo release, CancellationToken cancellationToken)
+    public async Task<UpdateDownloadResult> DownloadUpdateAsync(
+        UpdateReleaseInfo release,
+        CancellationToken cancellationToken,
+        IProgress<UpdateDownloadProgress>? progress = null)
     {
         try
         {
@@ -88,6 +91,7 @@ internal sealed class AutoUpdater
             var targetFileName = $"{Path.GetFileNameWithoutExtension(AppIdentity.ReleaseAssetExeName)}-{tagToken}.exe";
             var destinationPath = Path.Combine(AppPaths.UpdatesDirectory, targetFileName);
 
+            progress?.Report(UpdateDownloadProgress.StartingDownload(release.TagName));
             using var request = new HttpRequestMessage(HttpMethod.Get, release.AssetDownloadUrl);
             using var response = await HttpClient.SendAsync(
                 request,
@@ -95,9 +99,26 @@ internal sealed class AutoUpdater
                 cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
+            var totalBytes = response.Content.Headers.ContentLength;
             await using var source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             await using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+
+            var buffer = new byte[128 * 1024];
+            long downloadedBytes = 0;
+            while (true)
+            {
+                var bytesRead = await source.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+                downloadedBytes += bytesRead;
+                progress?.Report(UpdateDownloadProgress.Downloading(downloadedBytes, totalBytes));
+            }
+
+            progress?.Report(UpdateDownloadProgress.Verifying());
 
             var checksumResult = await VerifyChecksumIfAvailableAsync(destinationPath, release, cancellationToken).ConfigureAwait(false);
             if (!checksumResult.Success)
@@ -106,6 +127,7 @@ internal sealed class AutoUpdater
                 return UpdateDownloadResult.Fail(checksumResult.ErrorMessage ?? "Checksum verification failed.");
             }
 
+            progress?.Report(UpdateDownloadProgress.Completed(destinationPath));
             return UpdateDownloadResult.Ok(destinationPath);
         }
         catch (OperationCanceledException)
@@ -140,7 +162,7 @@ internal sealed class AutoUpdater
 
             Directory.CreateDirectory(AppPaths.UpdatesDirectory);
             var scriptPath = Path.Combine(AppPaths.UpdatesDirectory, $"apply-update-{Guid.NewGuid():N}.cmd");
-            File.WriteAllText(scriptPath, BuildUpdateScript(currentExePath, downloadedExePath), Encoding.ASCII);
+            File.WriteAllText(scriptPath, BuildUpdateScript(currentExePath, downloadedExePath, Environment.ProcessId), Encoding.ASCII);
 
             using var process = Process.Start(new ProcessStartInfo
             {
@@ -343,7 +365,7 @@ internal sealed class AutoUpdater
         return builder.ToString();
     }
 
-    private static string BuildUpdateScript(string currentExePath, string downloadedExePath)
+    private static string BuildUpdateScript(string currentExePath, string downloadedExePath, int currentProcessId)
     {
         var target = EscapeForBatch(currentExePath);
         var source = EscapeForBatch(downloadedExePath);
@@ -352,21 +374,24 @@ internal sealed class AutoUpdater
 setlocal enableextensions
 set "TARGET={target}"
 set "SOURCE={source}"
+set "PID={currentProcessId}"
 set "SELF=%~f0"
 
-for /l %%I in (1,1,60) do (
+for /l %%I in (1,1,90) do (
+  tasklist /FI "PID eq %PID%" 2>nul | findstr /I "%PID%" >nul
+  if errorlevel 1 goto wait_done
+  timeout /t 1 /nobreak >nul
+)
+
+:wait_done
+for /l %%I in (1,1,90) do (
   >nul 2>nul copy /y "%SOURCE%" "%TARGET%" && goto launch
   timeout /t 1 /nobreak >nul
 )
 
-goto relaunch
-
 :launch
 start "" "%TARGET%"
 goto cleanup
-
-:relaunch
-start "" "%TARGET%"
 
 :cleanup
 del /f /q "%SOURCE%" >nul 2>nul
@@ -479,6 +504,33 @@ internal sealed record UpdateDownloadResult(bool Success, string? DownloadedExeP
     public static UpdateDownloadResult Fail(string errorMessage)
     {
         return new UpdateDownloadResult(false, null, errorMessage);
+    }
+}
+
+internal sealed record UpdateDownloadProgress(
+    string StatusText,
+    long DownloadedBytes,
+    long? TotalBytes,
+    bool IsIndeterminate)
+{
+    public static UpdateDownloadProgress StartingDownload(string tagName)
+    {
+        return new UpdateDownloadProgress($"Downloading {tagName}...", 0, null, true);
+    }
+
+    public static UpdateDownloadProgress Downloading(long downloadedBytes, long? totalBytes)
+    {
+        return new UpdateDownloadProgress("Downloading update...", downloadedBytes, totalBytes, totalBytes is null || totalBytes <= 0);
+    }
+
+    public static UpdateDownloadProgress Verifying()
+    {
+        return new UpdateDownloadProgress("Verifying package...", 0, null, true);
+    }
+
+    public static UpdateDownloadProgress Completed(string destinationPath)
+    {
+        return new UpdateDownloadProgress($"Downloaded to {destinationPath}", 0, null, true);
     }
 }
 
